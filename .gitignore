@@ -164,3 +164,6 @@ pip-log.txt
 
 ##PyCharm
 .idea
+
+## IntelliJ
+*.iml
