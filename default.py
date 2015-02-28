@@ -4768,9 +4768,6 @@ else:
     elif mode == _MODE_PLAYLIBRARY:
         playLibraryMedia(param_url,force=force, override=param_transcodeOverride)
 
-    elif mode == _MODE_PLAYTRAILER:
-        playTrailer(param_url)
-
     elif mode == _MODE_PLAYSHELF:
         playLibraryMedia(param_url,full_data=True, shelf=True)
 
