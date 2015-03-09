@@ -4,6 +4,8 @@ import xbmcgui
 import sys
 import os
 import xml.etree.ElementTree as etree
+import urlparse
+import urllib
 
 from settings import addonSettings
 from common import *
@@ -27,7 +29,7 @@ class PlexMediaServer:
         self.server_name=name
         self.address=[address]
         self.port=port
-        self.section_list=None
+        self.section_list=[]
         self.token=token
         self.discovery=discovery
         self.owned=1
@@ -35,7 +37,23 @@ class PlexMediaServer:
         self.class_type=class_type
         self.discovered=False
         self.offline=False
+
+    def plex_identification(self):
+
+        return {'X-Plex-Device'            : 'XBMC/KODI' ,
+                'X-Plex-Client-Platform'   : 'XBMC/KODI' ,
+                'X-Plex-Device-Name'       : 'unknown' ,
+                'X-Plex-Language'          : 'en',
+                'X-Plex-Model'             : 'unknown' ,
+                'X-Plex-Platform'          : 'unknown' ,
+                'X-Plex-Client-Identifier' : 'unknown' ,
+                'X-Plex-Product'           : 'unknown' ,
+                'X-Plex-Platform-Version'  : 'unknown' ,
+                'X-Plex-Version'           : 'unknown'  ,
+                'X-Plex-Provides'          : "player",
+                'X-Plex-Token'             : self.token}
         
+
     def get_details(self):
                  
         return {'serverName': self.server_name,
@@ -70,7 +88,7 @@ class PlexMediaServer:
         return self.server_name
 
     def get_address(self):
-        return self.address
+        return self.address[0]
 
     def get_port(self):
         return self.port
@@ -105,12 +123,17 @@ class PlexMediaServer:
     def set_master(self, value):
         self.master=value
         
-    def talk(self,url='/',refresh=False):
+    def talk(self,url='/',refresh=False, type='get'):
     
         if not self.offline or refresh:
         
             try:
-                response = requests.get("http://%s:%s%s" % (self.address[0], self.port, url), params=self.plex_identification(), timeout=2)
+                if type == 'get':
+                    response = requests.get("%s://%s:%s%s" % (self.protocol, self.address[0], self.port, url), params=self.plex_identification(), timeout=3)
+                elif type == 'put':
+                    response = requests.put("%s://%s:%s%s" % (self.protocol, self.address[0], self.port, url), params=self.plex_identification(), timeout=3)                
+                elif type == 'delete':
+                    response = requests.delete("%s://%s:%s%s" % (self.protocol, self.address[0], self.port, url), params=self.plex_identification(), timeout=3)                
                 self.offline=False
             except requests.exceptions.ConnectionError, e:
                 printDebug("Server: %s is offline or uncontactable. error: %s" % (self.address[0], e))
@@ -120,12 +143,15 @@ class PlexMediaServer:
                 printDebug("URL was: %s" % response.url,self.DEBUG_DEBUG)
                 
                 if response.status_code == requests.codes.ok:
-                    printDebug.debug("Encoding: %s" % response.encoding)
+                    printDebug.debug("Response: 200 OK - Encoding: %s" % response.encoding)
                     printDebug("===XML===\n%s\n===XML===" % response.text.encode('utf-8'), self.DEBUG_DEBUGPLUS)
                     return response.text.encode('utf-8')
                     
         return '<?xml version="1.0" encoding="UTF-8"?><status>offline</status>'
 
+    def tell(self, url, refresh=False):
+        return self.talk (url, refresh, type='put')
+    
     def refresh(self):
         data=self.talk(refresh=True)
         
@@ -144,16 +170,29 @@ class PlexMediaServer:
             
     def is_offline(self):
         return self.offline
-        
+
     def get_sections(self):
-        return self.talk("/library/sections")
+    
+        #temp_list=[]
+    
+        #for section in self.section_list:        
+        #    temp_list.append(sections.get_details)
+            
+        printDebug.debug("Returning sections: %s" % self.section_list)
+        return self.section_list
+        
+    def discover_sections(self):
+        
+            for section in self.processed_xml("/library/sections"):
+            
+                self.section_list.append(plex_section(section))
 
     def get_recently_added(self,section=-1,start=0,size=0):
     
         arguments="?unwatched=1"
 
         if section < 0:
-            return self.talk("/library/recentlyAdded%s" % arguments)    
+            return self.processed_xml("/library/recentlyAdded%s" % arguments)    
             
         if size > 0:
             arguments="%s&X-Plex-Container-Start=%s&X-Plex-Container-Size=%s" % (arguments, start, size)
@@ -165,13 +204,19 @@ class PlexMediaServer:
         arguments=""
 
         if section < 0:
-            return self.talk("/library/onDeck%s" % arguments)    
+            return self.processed_xml("/library/onDeck%s" % arguments)    
             
         if size > 0:
             arguments="%s?X-Plex-Container-Start=%s&X-Plex-Container-Size=%s" % (arguments, start, size)
             
         return self.processed_xml("/library/sections/%s/onDeck%s" % (section, arguments))
 
+    def get_server_recentlyadded(self):
+        return self.get_recently_added(section=-1)
+  
+    def get_server_ondeck(self):
+        return self.get_ondeck(section=-1)
+  
     def get_channel_recentlyviewed(self):
             
         return self.processed_xml("/channels/recentlyViewed") 
@@ -192,3 +237,146 @@ class PlexMediaServer:
         if self.class_type == "secondary":
             return True
         return False
+
+    def get_formatted_url(self, url, options={}):
+    
+        options.update(self.plex_identification())
+    
+        location = "%s%s" % (self.get_url_location(), url)
+        
+        url_parts = urlparse.urlparse(location)
+
+        query_args = urlparse.parse_qsl(url_parts.query)
+        query_args += options.items()
+
+        new_query_args = urllib.urlencode(query_args, True)
+
+        return urlparse.urlunparse((url_parts.scheme, url_parts.netloc, url_parts.path, url_parts.params, new_query_args, url_parts.fragment))
+
+    def get_fanart(self, section, width=1280, height=720):
+        '''
+            Simply take a URL or path and determine how to format for fanart
+            @ input: elementTree element, server name
+            @ return formatted URL for photo resizing
+        '''
+        
+        printDebug.debug("Getting fanart for %s" % section.get_title())
+        
+        if settings.skipimages:
+            return ''
+            
+        if section.get_art().startswith('/'):
+            if settings.fullres_fanart:
+                return self.get_formatted_url(section.get_art())
+            else:
+                return self.get_formatted_url('/photo/:/transcode?url=%s&width=%s&height=%s' % (urllib.quote_plus("http://localhost:32400"+section.get_art()), width, height))
+
+        return section.get_art()     
+
+    def stop_transcode_session(self, session):
+        self.talk ('/video/:/transcode/segmented/stop?session=%s' % session)
+        return
+   
+    def report_playback_progress(self, id, time, state='playing'):
+        self.talk('/:/progress?key=%s&identifier=com.plexapp.plugins.library&time=%s&state=%s' % (id, time, state))
+        return
+
+    def mark_item_watched(self, id):
+        self.talk('/:/scrobble?key=%s&identifier=com.plexapp.plugins.library' % id)
+        return
+
+    def mark_item_unwatched(self, id):
+        self.talk('/:/unscrobble?key=%s&identifier=com.plexapp.plugins.library' % id)
+        return
+
+    def refresh_section(self, key):
+        return self.talk('/library/sections/%s/refresh' % key)
+
+    def get_metadata(self, id):
+        return self.processed_xml('/library/metadata/%s' % id)
+        
+    def set_audio_stream(self, part_id, stream_id):
+        return self.tell("/library/parts/%s?audioStreamID=%s" % (part_id, stream_id) )
+        
+    def set_subtitle_stream(self, part_id, stream_id):
+        return self.tell("/library/parts/%s?subtitleStreamID=%s" % (part_id, stream_id) )
+
+    def delete_metadata(self, id):
+        return self.talk('/library/metadata/%s' % id, type='delete')
+        
+class plex_section:
+
+    def __init__(self, data=None):
+    
+        self.title = None
+        self.sectionuuid = None
+        self.path = None
+        self.key = None
+        self.art = None
+        self.type = None
+        self.location = "local"
+    
+        if data is not None:
+            self.populate(data)
+    
+    def populate(self,data):
+    
+        path = data.get('key')
+        if not path[0] == "/":
+             path = '/library/sections/%s' % path
+    
+        self.title       = data.get('title', 'Unknown').encode('utf-8')
+        self.sectionuuid = data.get('uuid', '')
+        self.path        = path.encode('utf-8')
+        self.key         = data.get('key')
+        self.art         = data.get('art', '').encode('utf-8')
+        self.type        = data.get('type', '')
+
+    def get_details(self):
+    
+        return {'title'       : self.title,
+                'sectionuuid' : self.sectionuuid,
+                'path'       : self.path,
+                'key'        : self.key,
+                'location'   : self.local,
+                'art'        : self.art,
+                'type'       : self.type}
+                
+    def get_title(self):
+        return self.title
+
+    def get_uuid(self):
+        return self.sectionuuid
+
+    def get_path(self):
+        return self.path
+
+    def get_key(self):
+        return self.key
+
+    def get_art(self):
+        return self.art
+
+    def get_type(self):
+        return self.type
+
+    def is_show(self):
+        if self.type == 'show':
+            return True
+        return False
+    
+    def is_movie(self):
+        if self.type == 'movie':
+            return True
+        return False
+
+    def is_artist(self):
+        if self.type == 'artist':
+            return True
+        return False
+
+    def is_photo(self):
+        if self.type == 'photo':
+            return True
+        return False
+                

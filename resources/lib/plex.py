@@ -11,13 +11,14 @@ from common import *
 import CacheControl
 import requests
 from plexserver import PlexMediaServer
+import urlparse
 
 printDebug=printDebug("PleXBMC", "plex")
 DEFAULT_PORT="32400"
 
 class Plex:
 
-    def __init__(self, settings=None, cache=None):
+    def __init__(self, settings=None, cache=None, load=False):
     
         # Provide an interface into Plex 
         if not settings:
@@ -25,13 +26,27 @@ class Plex:
         else:
             self.settings = settings
             
-        self.cache=CacheControl.CacheControl(GLOBAL_SETUP['__cachedir__']+"cache/servers", self.settings.debug,self.settings.cache)
+        self.cache=CacheControl.CacheControl(GLOBAL_SETUP['__cachedir__']+"cache/servers", self.settings.debug)
         self.myplex_server='https://plex.tv'
         self.myplex_token=None
         self.logged_into_myplex=False
         self.server_list={}
         self.discovered=False
-                        
+        self.server_list_cache="discovered_plex_servers.cache"
+        
+        if load:
+            self.load()
+
+    def load(self):
+        printDebug.info("Loading cached server list")
+        data_ok, self.server_list = self.cache.checkCache(self.server_list_cache)
+        
+        if not data_ok:
+            printDebug.info("unsuccessful")
+            self.server_list={}
+    
+        printDebug.debug("Server list is now: %s" % self.server_list)
+    
     def discover(self):
         self.discover_all_servers()
         
@@ -76,7 +91,11 @@ class Plex:
         if response.status_code == requests.codes.ok:
             printDebug.debugplus("===XML===\n%s\n===XML===" % response.text)
             return response.text
-     
+
+    def get_processed_myplex_xml(self, url):
+        data = self.talk_to_myplex (url)
+        return etree.fromsting(data)
+            
     def discover_all_servers(self):
         printDebug.debug("== ENTER ==")
 
@@ -145,6 +164,7 @@ class Plex:
                 printDebug.info("MyPlex discovery completed")
                 self.merge_myplex(das_myplex)
 
+        self.cache.writeCache(self.server_list_cache, self.server_list)        
         printDebug.info("PleXBMC -> serverList is: %s " % self.server_list)
 
         return 
@@ -152,17 +172,12 @@ class Plex:
     def get_myplex_queue(self):
         printDebug.debug("== ENTER ==")
 
-        xml = self.getMyPlexURL('/pms/playlists/queue/all')
-
-        if xml is False:
-            return {}
-
-        return xml
+        return self.get_processed_myplex_xml('/pms/playlists/queue/all')
 
     def get_myplex_sections(self):
         printDebug.debug("== ENTER ==")
 
-        xml = self.getMyPlexURL('/pms/system/library/sections')
+        xml = self.talk_to_myplex('/pms/system/library/sections')
 
         if xml is False:
             return {}
@@ -180,7 +195,7 @@ class Plex:
         printDebug.debug("== ENTER ==")
 
         tempServers = {}
-        xml = self.getMyPlexURL("/pms/servers")
+        xml = self.talk_to_myplex("/pms/servers")
 
         if xml is False:
             return {}
@@ -220,7 +235,7 @@ class Plex:
 
         return 
         
-    def getMyPlexURL(self, url_path, renew=False, suppress=True):
+    def talk_to_myplex(self, path, renew=False, suppress=True):
         '''
             Connect to the my.plexapp.com service and get an XML pages
             A seperate function is required as interfacing into myplex
@@ -229,12 +244,12 @@ class Plex:
             @return: an xml page as string or false
         '''
         printDebug.debug("== ENTER ==")
-        printDebug.info("url = "+self.myplex_server+url_path)
+        printDebug.info("url = %s%s" % (self.myplex_server, path))
 
-        response = requests.get("%s%s" % (self.myplex_server, url_path), params=dict(self.plex_identification(), **self.getMyPlexToken(renew)))
+        response = requests.get("%s%s" % (self.myplex_server, path), params=dict(self.plex_identification(), **self.getMyPlexToken(renew)))
         
         if  response.status_code == 401   and not ( renew ):
-            return self.getMyPlexURL(url_path,True)
+            return self.talk_to_myplex(path,True)
 
         if response.status_code >= 400:
             error = "HTTP response error: " + str(data.status) + " " + str(data.reason)
@@ -243,7 +258,7 @@ class Plex:
             print error
             return False
         else:
-            link=response.text
+            link=response.text.encode('utf-8')
             printDebug.debugplus("====== XML returned =======")
             printDebug.debugplus(link)
             printDebug.debugplus("====== XML finished ======")
@@ -302,9 +317,9 @@ class Plex:
         
         if response.status_code == 201:
             try:
-                printDebug.debugplus(response.text)
+                printDebug.debugplus(response.text.encode('utf-8'))
                 printDebug.info("Received new plex token")
-                token = etree.fromstring(response.text).findtext('authentication-token')
+                token = etree.fromstring(response.text.encode('utf-8')).findtext('authentication-token')
                 self.settings.update_token(token)
             except:
                 printDebug.info("No authentication token found")
@@ -320,5 +335,47 @@ class Plex:
 
         return token
 
-    
+    def get_server_from_ip(self, ip):
         
+        printDebug.debug("IP to lookup: %s" % ip)
+        
+        if ':' in ip:
+            #We probably have an IP:port being passed
+            ip, port = ip.split(':')
+        
+        if not is_ip(ip):
+            printDebug.warn("Not an IP Address")
+            return None
+            
+        for server in self.server_list.values():
+            
+            printDebug.debug("checking ip %s against server ip %s" % (ip, server.get_address()))
+            
+            if ip == server.get_address():
+                printDebug("Translated %s to server %s" % (ip, server.get_name()))
+                return server
+
+        printDebug.info("Unable to translate %s to server" % ip )
+                
+        return PlexMediaServer(name="Unknown",address=ip, port=port, discovery='local')
+        
+    def get_server_from_url(self, url):
+        
+        url_parts = urlparse.urlparse(url)    
+                
+        return self.get_server_from_ip(url_parts.netloc)        
+
+    def get_server_from_uuid(self, uuid):
+                  
+        return self.server_list[uuid]
+        
+    def get_processed_xml(self, url):
+        
+        url_parts = urlparse.urlparse(url)
+        
+        server = self.get_server_from_ip(url_parts.netloc)
+        
+        if server:
+            return server.processed_xml(url_parts.path)
+        
+        return ''
